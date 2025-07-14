@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import time
+import tempfile
+from pyzbar import pyzbar
 
 import rclpy
 from rclpy.node import Node
@@ -59,6 +61,15 @@ class YoloDetectorNode(Node):
         self.fps_sum = 0
         self.fps_count = 0
 
+    def scan_qr_in_crop(self, crop):
+        """Scan for QR codes in the given crop using pyzbar."""
+        qr_codes = pyzbar.decode(crop)
+        if qr_codes:
+            for qr in qr_codes:
+                data = qr.data.decode('utf-8')
+                print(f"QR Code detected in object: {data}")
+        # No return needed, just print
+
     def image_callback(self, msg):
         # FPS calculation (real callback rate)
         new_frame_time = time.time()
@@ -114,6 +125,10 @@ class YoloDetectorNode(Node):
                 width = min(image_width - left, width)
                 height = min(image_height - top, height)
                 if width > 0 and height > 0:
+                    # Scan for QR code in the detected object crop
+                    crop = frame[top:top+height, left:left+width]
+                    if crop.size > 0:
+                        self.scan_qr_in_crop(crop)
                     cv2.rectangle(annotated_frame, (left, top), (left + width, top + height), (0, 255, 0), 1)
                     label = f"{CLASS_NAMES[class_id]}: {confidence:.2f}"
                     label_x = left

@@ -264,7 +264,7 @@ def generate_launch_description():
         camera_info_bridge,
         lidar_bridge,
         spawn_robot,
-      #  nav2,
+        nav2,
         corti,
         slam,
         localization,
