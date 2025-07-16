@@ -5,7 +5,6 @@ from std_msgs.msg import Float32MultiArray
 import numpy as np
 import cv2
 from sklearn.cluster import DBSCAN
-import tkinter as tk
 
 class ShelfDetector(Node):
     def __init__(self):
@@ -15,49 +14,17 @@ class ShelfDetector(Node):
             '/map',
             self.map_callback,
             1)
-        self.publisher_rects = self.create_publisher(Float32MultiArray, '/shelf_rects', 1)
+        self.publisher_rects = self.create_publisher(Float32MultiArray, '/blob_rects', 1)
         self.publisher_occmap = self.create_publisher(OccupancyGrid, '/shelf_rect_map', 1)
 
         self.dilate_kernel = 5
         self.dbscan_eps = 10
         self.dbscan_min_samples = 2
         self.merge_dist_thresh = 1
-
         self.min_contour_area = 50
         self.max_contour_area = 1000
         self.min_contour_diagonal = 10
         self.max_contour_diagonal = 70
-
-        self.tk_root = tk.Tk()
-        self.tk_root.title("Shelf Detector Params")
-        self.tk_vars = {}
-        # Add all relevant sliders for debugging
-        self._make_tk_slider("dilate_kernel", 1, 11, self.dilate_kernel)
-        self._make_tk_slider("dbscan_eps", 1, 30, self.dbscan_eps)
-        self._make_tk_slider("dbscan_min_samples", 1, 30, self.dbscan_min_samples)
-        self._make_tk_slider("merge_dist_thresh", 1, 100, self.merge_dist_thresh)
-        self._make_tk_slider("min_contour_area", 10, 1000, self.min_contour_area)
-        self._make_tk_slider("max_contour_area", 10, 2000, self.max_contour_area)
-        self._make_tk_slider("min_contour_diagonal", 1, 100, self.min_contour_diagonal)
-        self._make_tk_slider("max_contour_diagonal", 1, 200, self.max_contour_diagonal)
-        self.tk_root.after(100, self._tk_update)
-
-    def _make_tk_slider(self, name, minv, maxv, init):
-        var = tk.DoubleVar(value=init)
-        self.tk_vars[name] = var
-        scale = tk.Scale(self.tk_root, label=name, from_=minv, to=maxv, orient=tk.HORIZONTAL, resolution=1, variable=var)
-        scale.pack()
-
-    def _tk_update(self):
-        self.dilate_kernel = int(self.tk_vars["dilate_kernel"].get())
-        self.dbscan_eps = float(self.tk_vars["dbscan_eps"].get())
-        self.dbscan_min_samples = int(self.tk_vars["dbscan_min_samples"].get())
-        self.merge_dist_thresh = float(self.tk_vars["merge_dist_thresh"].get())
-        self.min_contour_area = float(self.tk_vars["min_contour_area"].get())
-        self.max_contour_area = float(self.tk_vars["max_contour_area"].get())
-        self.min_contour_diagonal = float(self.tk_vars["min_contour_diagonal"].get())
-        self.max_contour_diagonal = float(self.tk_vars["max_contour_diagonal"].get())
-        self.tk_root.after(100, self._tk_update)
 
     def map_callback(self, msg):
         width = msg.info.width
@@ -79,7 +46,6 @@ class ShelfDetector(Node):
         if occ_points.shape[0] == 0:
             debug_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
             debug_img_flipped = cv2.flip(debug_img, 0)
-            # Make output image landscape (transpose if height > width)
             if debug_img_flipped.shape[0] > debug_img_flipped.shape[1]:
                 debug_img_flipped = cv2.rotate(debug_img_flipped, cv2.ROTATE_90_ANTICLOCKWISE)
             cv2.imshow('Shelf Detector Debug', debug_img_flipped)
@@ -166,18 +132,23 @@ class ShelfDetector(Node):
             cv2.fillPoly(rect_mask, [rect_int_cv], 1)
             contour_occ[rect_mask == 1] = 100
 
+            # Convert to world coordinates and publish as array of tuples: [cx,cy, (x1,y1), (x2,y2), (x3,y3), (x4,y4)]
+            row_c, col_c = mean
+            wx_c = origin_x + (col_c + 0.5) * resolution
+            wy_c = origin_y + (row_c + 0.5) * resolution
+            rect_tuple = [wx_c, wy_c]
             for corner in rect_corners:
                 row, col = corner
                 wx = origin_x + (col + 0.5) * resolution
                 wy = origin_y + (row + 0.5) * resolution
-                rect_data.extend([wx, wy])
+                rect_tuple.extend([wx, wy])
+            rect_data.extend(rect_tuple)
 
         debug_img_flipped = cv2.flip(debug_img, 0)
         if debug_img_flipped.shape[0] > debug_img_flipped.shape[1]:
             debug_img_flipped = cv2.rotate(debug_img_flipped, cv2.ROTATE_90_COUNTERCLOCKWISE)
         cv2.imshow('Shelf Detector Debug', debug_img_flipped)
         cv2.waitKey(1)
-        self.tk_root.update()
 
         msg_rects = Float32MultiArray()
         msg_rects.data = rect_data
