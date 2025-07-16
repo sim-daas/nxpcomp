@@ -117,6 +117,7 @@ class WarehouseController(Node):
         self.max_qr_attempts = 5
         self.qr_attempt_interval = 3.0  # seconds between attempts
         self.last_qr_attempt_time = None
+        self.navigation_to_qr_complete = False  # New flag to track navigation phase
         
         self.get_logger().info("Warehouse Controller initialized")
 
@@ -564,7 +565,7 @@ class WarehouseController(Node):
             self.current_state = RobotState.EXPLORING_FOR_SHELF
             return
         
-        # Use corner coordinates to determine distances to sides
+        # Use corner coordinates to determine distances to actual shelf segments
         robot_pos = np.array([self.current_pose.pose.pose.position.x, 
                              self.current_pose.pose.pose.position.y])
         shelf_center = np.array([self.last_known_shelf_pose.pose.position.x,
@@ -573,115 +574,137 @@ class WarehouseController(Node):
         # Get length and breadth vectors
         length_vector, breadth_vector, length_value, breadth_value = self.get_shelf_length_breadth_vectors(self.last_known_shelf_blob)
         
-        # Calculate centers of length and breadth sides
-        length_side_center = shelf_center + breadth_vector * (breadth_value / 2)
-        breadth_side_center = shelf_center + length_vector * (length_value / 2)
+        # Calculate all 4 side centers (not just one per dimension)
+        # Length sides (there are 2 opposite length sides)
+        length_side1_center = shelf_center + breadth_vector * (breadth_value / 2)  # positive breadth direction
+        length_side2_center = shelf_center - breadth_vector * (breadth_value / 2)  # negative breadth direction
         
-        # Calculate distances to each side center
-        dist_to_length_side = np.linalg.norm(robot_pos - length_side_center)
-        dist_to_breadth_side = np.linalg.norm(robot_pos - breadth_side_center)
+        # Breadth sides (there are 2 opposite breadth sides) 
+        breadth_side1_center = shelf_center + length_vector * (length_value / 2)   # positive length direction
+        breadth_side2_center = shelf_center - length_vector * (length_value / 2)   # negative length direction
+        
+        # Calculate distances to all 4 sides
+        dist_to_length_side1 = np.linalg.norm(robot_pos - length_side1_center)
+        dist_to_length_side2 = np.linalg.norm(robot_pos - length_side2_center)
+        dist_to_breadth_side1 = np.linalg.norm(robot_pos - breadth_side1_center)
+        dist_to_breadth_side2 = np.linalg.norm(robot_pos - breadth_side2_center)
+        
+        # Find minimum distances to length and breadth sides
+        min_dist_to_length_side = min(dist_to_length_side1, dist_to_length_side2)
+        min_dist_to_breadth_side = min(dist_to_breadth_side1, dist_to_breadth_side2)
+        
+        # Determine which specific side is closest
+        closest_side = ""
+        if dist_to_length_side1 == min_dist_to_length_side:
+            closest_side = "length_side1"
+        elif dist_to_length_side2 == min_dist_to_length_side:
+            closest_side = "length_side2"
+        elif dist_to_breadth_side1 == min_dist_to_breadth_side:
+            closest_side = "breadth_side1"
+        else:
+            closest_side = "breadth_side2"
         
         self.get_logger().info(f"Robot pos: {robot_pos}")
         self.get_logger().info(f"Shelf center: {shelf_center}")
-        self.get_logger().info(f"Length side center: {length_side_center}, Distance: {dist_to_length_side:.2f}")
-        self.get_logger().info(f"Breadth side center: {breadth_side_center}, Distance: {dist_to_breadth_side:.2f}")
+        self.get_logger().info(f"Length side 1 center: {length_side1_center}, Distance: {dist_to_length_side1:.2f}")
+        self.get_logger().info(f"Length side 2 center: {length_side2_center}, Distance: {dist_to_length_side2:.2f}")
+        self.get_logger().info(f"Breadth side 1 center: {breadth_side1_center}, Distance: {dist_to_breadth_side1:.2f}")
+        self.get_logger().info(f"Breadth side 2 center: {breadth_side2_center}, Distance: {dist_to_breadth_side2:.2f}")
+        self.get_logger().info(f"Min distance to length sides: {min_dist_to_length_side:.2f}")
+        self.get_logger().info(f"Min distance to breadth sides: {min_dist_to_breadth_side:.2f}")
+        self.get_logger().info(f"Closest side: {closest_side}")
         self.get_logger().info(f"Length vector: {length_vector}, Length value: {length_value:.2f}")
         self.get_logger().info(f"Breadth vector: {breadth_vector}, Breadth value: {breadth_value:.2f}")
         
         # Add 2 second delay for debugging
         time.sleep(2.0)
         
-        # Decide which operation to do first based on proximity
-        if dist_to_length_side < dist_to_breadth_side:
-            # Closer to length side - do object detection first
-            self.detection_status = "qr"  # QR scanning left to do
+        # Decide which operation to do first based on actual proximity to shelf sides
+        if min_dist_to_length_side < min_dist_to_breadth_side:
+            # Closer to any length side - do object detection first (objects are on length side)
+            self.detection_status = "qr"  # QR scanning left to do after object detection
             self.current_state = RobotState.DETECTING_OBJECTS
-            self.get_logger().info("Closer to length side - Transitioning to DETECTING_OBJECTS, will do QR scanning after")
+            self.get_logger().info(f"Closer to length side ({closest_side}) - Transitioning to DETECTING_OBJECTS, will do QR scanning after")
         else:
-            # Closer to breadth side - do QR scanning first
-            self.detection_status = "objdet"  # Object detection left to do
+            # Closer to any breadth side - do QR scanning first (QR is on breadth side)
+            self.detection_status = "objdet"  # Object detection left to do after QR scanning
             self.current_state = RobotState.SCANNING_QR
-            self.get_logger().info("Closer to breadth side - Transitioning to SCANNING_QR, will do object detection after")
+            self.get_logger().info(f"Closer to breadth side ({closest_side}) - Transitioning to SCANNING_QR, will do object detection after")
 
     def handle_scanning_qr(self):
         """Handle SCANNING_QR state"""
-        self.get_logger().info(f"SCANNING_QR: Goal completed: {self.goal_completed}, QR result: {self.latest_qr_result}, QR scan requested: {self.qr_scan_requested}, Attempts: {self.qr_scan_attempts}/{self.max_qr_attempts}")
+        self.get_logger().info(f"SCANNING_QR: Goal completed: {self.goal_completed}, QR result: {self.latest_qr_result}, " +
+                              f"Attempts: {self.qr_scan_attempts}/{self.max_qr_attempts}")
         
         if not self.last_known_shelf_pose:
             self.get_logger().warn("No shelf pose available, returning to exploration")
             self.current_state = RobotState.EXPLORING_FOR_SHELF
+            self.reset_qr_scanning_state()
             return
-        
-        # Only send new goal if current one is completed and we haven't requested QR scan yet
-        if self.goal_completed and not self.qr_scan_requested:
-            # Add 2 second delay for debugging
-            time.sleep(2.0)
+
+        # Skip navigation phase and go directly to scanning when goal completes
+        if self.goal_completed:
+            # Perform QR scanning immediately
+            self.get_logger().info("Performing QR scanning")
             
-            # Calculate QR scan pose using corner coordinates
-            qr_goal = self.calculate_qr_scan_pose(self.last_known_shelf_pose, self.last_known_shelf_blob)
-            self.get_logger().info(f"Sending QR scan goal to ({qr_goal.pose.position.x:.2f}, {qr_goal.pose.position.y:.2f})")
-            success = self.send_nav_goal(qr_goal)
-            if success:
-                self.qr_scan_requested = True
+            # Initialize scanning timers if needed
+            if not self.qr_scan_start_time:
                 self.qr_scan_start_time = time.time()
-                self.qr_scan_attempts = 0  # Reset attempts when starting new scan session
-                self.last_qr_attempt_time = None
-                self.get_logger().info("Goal sent, will call QR service when robot reaches position")
-            return
-        
-        # If goal is completed and we've requested QR scan, start scanning attempts
-        if self.goal_completed and self.qr_scan_requested and self.qr_scan_start_time:
+                self.qr_scan_requested = True  # Mark that we're scanning
+                self.get_logger().info("QR scanning started")
+            
             current_time = time.time()
             
-            # Check if we should make a new attempt
+            # Determine if we should make a scanning attempt
             should_attempt = False
             if self.qr_scan_attempts == 0:
-                # First attempt - wait 2 seconds for robot to stabilize
+                # First attempt - wait for robot to stabilize
                 if current_time - self.qr_scan_start_time > 2.0:
                     should_attempt = True
+                    self.get_logger().info("Robot stabilized, making first QR scan attempt")
             else:
-                # Subsequent attempts - wait for interval between attempts
+                # Subsequent attempts - enforce interval between attempts
                 if (self.last_qr_attempt_time and 
                     current_time - self.last_qr_attempt_time > self.qr_attempt_interval):
                     should_attempt = True
+                    self.get_logger().info(f"Interval elapsed, making QR scan attempt #{self.qr_scan_attempts+1}")
             
-            # Make QR scan attempt
+            # Make the QR scan attempt if conditions are met
             if should_attempt and self.qr_scan_attempts < self.max_qr_attempts:
                 self.qr_scan_attempts += 1
                 self.last_qr_attempt_time = current_time
                 self.get_logger().info(f"QR scan attempt {self.qr_scan_attempts}/{self.max_qr_attempts}")
                 self.call_qr_service()
-        
-        # Check for successful QR scan
-        if self.latest_qr_result and self.qr_scan_requested:
-            shelf_id, angle = self.parse_qr_string(self.latest_qr_result)
-            if shelf_id is not None:
-                self.get_logger().info(f"QR decoded successfully after {self.qr_scan_attempts} attempts: Shelf {shelf_id}, Angle {angle}")
-                self.qr_scan_requested = False  # Reset scan request
-                self.qr_scan_attempts = 0  # Reset attempts
-                if self.detection_status == "objdet":
-                    self.detection_status = "0"
-                    self.current_state = RobotState.DETECTING_OBJECTS
-                    self.get_logger().info("Transitioning to DETECTING_OBJECTS")
-                else:
-                    self.current_state = RobotState.NAVIGATING_TO_NEXT_SHELF
-                    self.get_logger().info("Transitioning to NAVIGATING_TO_NEXT_SHELF")
-                return
-        
-        # Check for timeout or max attempts reached
-        if self.qr_scan_requested and self.qr_scan_start_time:
-            current_time = time.time()
-            if (current_time - self.qr_scan_start_time > self.qr_scan_timeout or 
+            
+            # Check for successful QR scan
+            if self.latest_qr_result:
+                shelf_id, angle = self.parse_qr_string(self.latest_qr_result)
+                if shelf_id is not None:
+                    self.get_logger().info(f"QR decoded successfully after {self.qr_scan_attempts} attempts: Shelf {shelf_id}, Angle {angle}")
+                    # Reset all scanning state variables
+                    self.reset_qr_scanning_state()
+                    
+                    # Transition to next state
+                    if self.detection_status == "objdet":
+                        self.detection_status = "0"
+                        self.current_state = RobotState.DETECTING_OBJECTS
+                        self.get_logger().info("Transitioning to DETECTING_OBJECTS")
+                    else:
+                        self.current_state = RobotState.NAVIGATING_TO_NEXT_SHELF
+                        self.get_logger().info("Transitioning to NAVIGATING_TO_NEXT_SHELF")
+                    return
+            
+            # Check for timeout or max attempts reached
+            if self.qr_scan_start_time and (
+                current_time - self.qr_scan_start_time > self.qr_scan_timeout or 
                 self.qr_scan_attempts >= self.max_qr_attempts):
                 
-                if self.qr_scan_attempts >= self.max_qr_attempts:
-                    self.get_logger().warn(f"QR scanning failed after {self.max_qr_attempts} attempts, proceeding without QR")
-                else:
-                    self.get_logger().warn("QR scanning timeout, proceeding without QR")
+                self.get_logger().warn(f"QR scanning failed: attempts={self.qr_scan_attempts}, timeout={current_time - self.qr_scan_start_time:.1f}s")
                 
-                self.qr_scan_requested = False
-                self.qr_scan_attempts = 0
+                # Reset all scanning state variables
+                self.reset_qr_scanning_state()
                 
+                # Transition to next state
                 if self.detection_status == "objdet":
                     self.detection_status = "0"
                     self.current_state = RobotState.DETECTING_OBJECTS
@@ -689,6 +712,14 @@ class WarehouseController(Node):
                 else:
                     self.current_state = RobotState.NAVIGATING_TO_NEXT_SHELF
                     self.get_logger().info("Failed QR scan - Transitioning to NAVIGATING_TO_NEXT_SHELF")
+    
+    def reset_qr_scanning_state(self):
+        """Reset all QR scanning state variables"""
+        self.qr_scan_requested = False
+        self.navigation_to_qr_complete = False
+        self.qr_scan_start_time = None
+        self.qr_scan_attempts = 0
+        self.last_qr_attempt_time = None
 
     def handle_detecting_objects(self):
         """Handle DETECTING_OBJECTS state"""

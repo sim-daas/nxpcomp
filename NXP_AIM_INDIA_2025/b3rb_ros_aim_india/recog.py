@@ -107,6 +107,22 @@ class QRScannerService(Node):
         """Service callback to start/stop QR scanning"""
         self.actively_scanning = True
         self.get_logger().info("QR scanning activated via service call")
+        
+        # If we have a recent image, try scanning immediately
+        if self.latest_camera_image:
+            try:
+                frame = self.bridge.imgmsg_to_cv2(self.latest_camera_image, desired_encoding='bgr8')
+                qr_data = self.scan_qr_in_crop(frame)
+                if qr_data:
+                    self.get_logger().info(f"QR Code detected immediately: {qr_data}")
+                    msg = String()
+                    msg.data = qr_data
+                    self.qr_pub.publish(msg)
+                    self.last_qr_result = qr_data
+                    self.last_qr_time = time.time()
+            except Exception as e:
+                self.get_logger().warn(f"Error in immediate QR scan: {e}")
+        
         response.success = True
         response.message = "QR scanning activated"
         return response
