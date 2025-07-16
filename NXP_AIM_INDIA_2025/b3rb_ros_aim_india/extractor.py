@@ -2,11 +2,12 @@ import cv2
 import numpy as np
 import os
 import time
-
+import math
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
+from std_msgs.msg import Float32MultiArray
 
 MODEL_PATH = "/home/user/cognipilot/shelf.onnx"
 BLURCOCO_MODEL_PATH = "/home/user/cognipilot/blurcoco.onnx"
@@ -57,6 +58,15 @@ blurcoco_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_DEFAULT)
 blurcoco_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 print("Using CPU backend for inference.")
 
+def shelf_angle_from_center_x(center_x, resolution):
+    # The field of view is assumed to be 60 degrees (30 degrees to each side).
+    # All calculations are in radians.
+    fov_rad = math.radians(60)
+    half_res = resolution / 2
+    # The angle offset from the center (0 at center, negative left, positive right)
+    angle = -math.degrees(math.atan((center_x - half_res) * math.tan(fov_rad / 2) / half_res))
+    return angle
+
 class ExtractorNode(Node):
     def __init__(self):
         super().__init__('extractor_node')
@@ -70,6 +80,11 @@ class ExtractorNode(Node):
         self.publisher = self.create_publisher(
             Image,
             '/detection/image_raw',
+            1
+        )
+        self.shelf_info_pub = self.create_publisher(
+            Float32MultiArray,
+            '/shelf_det',
             1
         )
         self.prev_frame_time = time.time()
@@ -127,7 +142,6 @@ class ExtractorNode(Node):
                 width = min(image_width - left, width)
                 height = min(image_height - top, height)
                 if width > 0 and height > 0:
-                    print(f"{CLASS_NAMES[0]} confidence: {confs[i]:.3f}")
                     cv2.rectangle(annotated_frame, (left, top), (left + width, top + height), (0, 255, 0), 1)
                     area_ratio = (width * height) / (image_width * image_height)
                     label = f"{CLASS_NAMES[0]}: {area_ratio:.3f}"
@@ -141,6 +155,15 @@ class ExtractorNode(Node):
                         (0, 255, 0),
                         1
                     )
+
+                    # Calculate shelf center x and angle
+                    center_x = left + width / 2
+                    angle = shelf_angle_from_center_x(center_x, image_width)
+
+                    # Publish area ratio and angle
+                    shelf_info_msg = Float32MultiArray()
+                    shelf_info_msg.data = [area_ratio, angle]
+                    self.shelf_info_pub.publish(shelf_info_msg)
 
                     crop = frame[top:top+height, left:left+width]
                     if crop.shape[0] > 0 and crop.shape[1] > 0:
@@ -181,7 +204,6 @@ class ExtractorNode(Node):
                                 bheight = min(image_height - btop, bheight)
                                 if bwidth > 0 and bheight > 0:
                                     obj_name = BLURCOCO_CLASS_NAMES[b_class_ids[k]] if b_class_ids[k] < len(BLURCOCO_CLASS_NAMES) else str(b_class_ids[k])
-                                    print(f"{obj_name} confidence: {b_confs[k]:.3f}")
                                     color = BLURCOCO_COLORS[b_class_ids[k] % len(BLURCOCO_COLORS)] if b_class_ids[k] < len(BLURCOCO_COLORS) else (0, 0, 255)
                                     cv2.rectangle(annotated_frame, (bleft, btop), (bleft + bwidth, btop + bheight), color, 1)
                                     if b_class_ids[k] < len(BLURCOCO_CLASS_NAMES):

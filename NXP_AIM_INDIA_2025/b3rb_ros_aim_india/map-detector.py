@@ -1,11 +1,9 @@
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
-from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray
 import numpy as np
 import cv2
-from cv_bridge import CvBridge
 
 class ShelfLineDetector(Node):
     def __init__(self):
@@ -16,8 +14,7 @@ class ShelfLineDetector(Node):
             self.map_callback,
             1)
         self.publisher_contours = self.create_publisher(Float32MultiArray, '/shelf_contours', 1)
-        self.publisher_image = self.create_publisher(Image, '/shelf_contours/image_raw', 1)
-        self.bridge = CvBridge()
+        self.publisher_occmap = self.create_publisher(OccupancyGrid, '/shelf_contour_map', 1)
 
         # Tuned contour area and diagonal filter variables
         self.dilate_kernel = 1
@@ -46,6 +43,9 @@ class ShelfLineDetector(Node):
         debug_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         contour_data = []
 
+        # Create a blank occupancy grid for contours only
+        contour_occ = np.full((height, width), -1, dtype=np.int8)
+
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area < self.min_contour_area or area > self.max_contour_area:
@@ -63,33 +63,34 @@ class ShelfLineDetector(Node):
                 continue
             # Draw contour and diagonal
             cv2.drawContours(debug_img, [cnt], -1, (255,0,0), 2)
+            cv2.drawContours(contour_occ, [cnt], -1, 100, thickness=-1)  # Fill contour as obstacle
             if pt1 is not None and pt2 is not None:
                 cv2.line(debug_img, pt1, pt2, (0,0,255), 2)
-                # Compute center
                 cx = int((pt1[0] + pt2[0]) / 2)
                 cy = int((pt1[1] + pt2[1]) / 2)
                 cv2.circle(debug_img, (cx, cy), 3, (0,255,255), -1)
-                # Convert to world coordinates
                 wx1 = origin_x + (pt1[0] + 0.5) * resolution
                 wy1 = origin_y + (pt1[1] + 0.5) * resolution
                 wx2 = origin_x + (pt2[0] + 0.5) * resolution
                 wy2 = origin_y + (pt2[1] + 0.5) * resolution
                 wcx = origin_x + (cx + 0.5) * resolution
                 wcy = origin_y + (cy + 0.5) * resolution
-                # Store as [x1, y1, x2, y2, cx, cy]
                 contour_data.extend([wx1, wy1, wx2, wy2, wcx, wcy])
 
         debug_img_flipped = cv2.flip(debug_img, 0)
+        cv2.imshow('Shelf Contours Debug', debug_img_flipped)
+        cv2.waitKey(1)
 
         msg_contours = Float32MultiArray()
         msg_contours.data = contour_data
         self.publisher_contours.publish(msg_contours)
 
-        img_msg = self.bridge.cv2_to_imgmsg(debug_img_flipped, encoding='bgr8')
-        self.publisher_image.publish(img_msg)
-
-        cv2.imshow('Shelf Contours Debug', debug_img_flipped)
-        cv2.waitKey(1)
+        # Publish the new occupancy grid with only contours as obstacles
+        occ_msg = OccupancyGrid()
+        occ_msg.header = msg.header
+        occ_msg.info = msg.info
+        occ_msg.data = contour_occ.flatten().tolist()
+        self.publisher_occmap.publish(occ_msg)
 
 def main(args=None):
     rclpy.init(args=args)
