@@ -229,7 +229,19 @@ def generate_launch_description():
 
     object_recog = Node(
         package='b3rb_ros_aim_india',
-        executable='detect',
+        executable='extractor',
+        output='screen',
+        )
+
+    shelf_detector = Node(
+        package='b3rb_ros_aim_india',
+        executable='shelf_detector',
+        output='screen',
+        )
+
+    qr_scanner = Node(
+        package='b3rb_ros_aim_india',
+        executable='qr_scanner',
         output='screen',
         )
 
@@ -242,12 +254,11 @@ def generate_launch_description():
             }],
         )
 
-    warehouse_solver = Node(
+    warehouse_controller = Node(
         package='b3rb_ros_aim_india',
-        executable='explore',
+        executable='controller',
         output='screen',
         parameters=[{
-            'shelf_count': LaunchConfiguration('shelf_count'),
             'initial_angle': LaunchConfiguration('initial_angle'),
             }],
         )
@@ -269,7 +280,9 @@ def generate_launch_description():
         slam,
         localization,
         odom_to_tf,
-      #  object_recog,
+        object_recog,
+        shelf_detector,
+        qr_scanner,
         model_remover,
-        warehouse_solver,
+        warehouse_controller,
     ])

@@ -392,12 +392,12 @@ class WarehouseExplore(Node):
 		"""
 		if message.mode == 3 and message.arming == 2:
 			self.armed = True
-		# else:
+		else:
 		# 	# Initialize and arm the CMD_VEL mode.
-		# 	msg = Joy()
-		# 	msg.buttons = [0, 1, 0, 0, 0, 0, 0, 1]
-		# 	msg.axes = [0.0, 0.0, 0.0, 0.0]
-		# 	self.publisher_joy.publish(msg)
+			msg = Joy()
+			msg.buttons = [0, 1, 0, 0, 0, 0, 0, 1]
+			msg.axes = [0.0, 0.0, 0.0, 0.0]
+			self.publisher_joy.publish(msg)
 
 	def behavior_tree_log_callback(self, message):
 		"""Alternative method for checking goal status.

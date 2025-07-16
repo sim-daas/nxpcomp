@@ -22,12 +22,15 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-                'explore = b3rb_ros_aim_india.b3rb_ros_warehouse:main',
-                'visualize = b3rb_ros_aim_india.b3rb_ros_draw_map:main',
-                'remover = b3rb_ros_aim_india.b3rb_ros_model_remove:main',
-                'detect = b3rb_ros_aim_india.b3rb_ros_object_recog:main',
-                'control = b3rb_ros_aim_india.teleop_tk:main',
-                'recog = b3rb_ros_aim_india.recog:main',
+            'explore = b3rb_ros_aim_india.b3rb_ros_warehouse:main',
+            'visualize = b3rb_ros_aim_india.b3rb_ros_draw_map:main',
+            'remover = b3rb_ros_aim_india.b3rb_ros_model_remove:main',
+            'detect = b3rb_ros_aim_india.b3rb_ros_object_recog:main',
+            'control = b3rb_ros_aim_india.teleop_tk:main',
+            'qr_scanner = b3rb_ros_aim_india.recog:main',
+            'extractor = b3rb_ros_aim_india.extractor:main',
+            'shelf_detector = b3rb_ros_aim_india.shelf_detector:main',
+            'controller = b3rb_ros_aim_india.controller:main',
         ],
     },
 )

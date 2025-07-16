@@ -87,6 +87,11 @@ class ExtractorNode(Node):
             '/shelf_det',
             1
         )
+        self.object_dets_pub = self.create_publisher(
+            Float32MultiArray,
+            '/object_dets',
+            1
+        )
         self.prev_frame_time = time.time()
         self.fps = 0
         self.fps_sum = 0
@@ -99,7 +104,7 @@ class ExtractorNode(Node):
         self.fps_sum += self.fps
         self.fps_count += 1
         avg_fps = self.fps_sum / self.fps_count if self.fps_count > 0 else 0
-        print(f"FPS: {self.fps:.2f} | Avg FPS: {avg_fps:.2f}")
+        # Removed FPS printing
 
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         image_height, image_width, _ = frame.shape
@@ -132,6 +137,7 @@ class ExtractorNode(Node):
 
         indexes = cv2.dnn.NMSBoxes(boxes, confs, CONF_THRESHOLD_SHELF, NMS_THRESHOLD)
         annotated_frame = frame.copy()
+        object_dets = []
 
         if len(indexes) > 0:
             for i in indexes.flatten():
@@ -204,6 +210,17 @@ class ExtractorNode(Node):
                                 bheight = min(image_height - btop, bheight)
                                 if bwidth > 0 and bheight > 0:
                                     obj_name = BLURCOCO_CLASS_NAMES[b_class_ids[k]] if b_class_ids[k] < len(BLURCOCO_CLASS_NAMES) else str(b_class_ids[k])
+                                    # Only publish non-digit and not 'L'
+                                    if not (obj_name.isdigit() or obj_name == "L"):
+                                        # [class_id, x1, y1, x2, y2, conf]
+                                        object_dets.extend([
+                                            float(b_class_ids[k]),
+                                            float(bleft),
+                                            float(btop),
+                                            float(bleft + bwidth),
+                                            float(btop + bheight),
+                                            float(b_confs[k])
+                                        ])
                                     color = BLURCOCO_COLORS[b_class_ids[k] % len(BLURCOCO_COLORS)] if b_class_ids[k] < len(BLURCOCO_COLORS) else (0, 0, 255)
                                     cv2.rectangle(annotated_frame, (bleft, btop), (bleft + bwidth, btop + bheight), color, 1)
                                     if b_class_ids[k] < len(BLURCOCO_CLASS_NAMES):
@@ -211,6 +228,12 @@ class ExtractorNode(Node):
                                     else:
                                         b_label = f"{b_class_ids[k]}: {b_confs[k]:.2f}"
                                     cv2.putText(annotated_frame, b_label, (bleft, btop + bheight), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        # Publish object detections
+        if object_dets:
+            object_dets_msg = Float32MultiArray()
+            object_dets_msg.data = object_dets
+            self.object_dets_pub.publish(object_dets_msg)
 
         fps_text = f"FPS: {int(self.fps)} | Avg: {avg_fps:.1f}"
         cv2.putText(annotated_frame, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
