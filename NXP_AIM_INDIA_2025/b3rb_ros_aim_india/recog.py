@@ -102,9 +102,12 @@ class QRScannerService(Node):
                 
                 self.last_qr_result = qr_data
                 self.last_qr_time = current_time
+                
+                # Stop scanning after finding QR code
+                self.actively_scanning = False
 
     def scan_qr_service_callback(self, request, response):
-        """Service callback to start/stop QR scanning"""
+        """Service callback to start QR scanning"""
         self.actively_scanning = True
         self.get_logger().info("QR scanning activated via service call")
         
@@ -120,6 +123,8 @@ class QRScannerService(Node):
                     self.qr_pub.publish(msg)
                     self.last_qr_result = qr_data
                     self.last_qr_time = time.time()
+                    # Stop scanning after finding QR code
+                    self.actively_scanning = False
             except Exception as e:
                 self.get_logger().warn(f"Error in immediate QR scan: {e}")
         

@@ -83,7 +83,7 @@ controller_server:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 1.0
+      yaw_goal_tolerance: 0.1  # Reduced from 1.0 to 0.1 radian (~5.7 degrees) for pose corrections
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.5

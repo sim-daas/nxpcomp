@@ -166,9 +166,9 @@ class ExtractorNode(Node):
                     center_x = left + width / 2
                     angle = shelf_angle_from_center_x(center_x, image_width)
 
-                    # Publish area ratio and angle
+                    # Publish area ratio, angle, and bounding box coordinates
                     shelf_info_msg = Float32MultiArray()
-                    shelf_info_msg.data = [area_ratio, angle]
+                    shelf_info_msg.data = [area_ratio, angle, float(left), float(top), float(left + width), float(top + height)]
                     self.shelf_info_pub.publish(shelf_info_msg)
 
                     crop = frame[top:top+height, left:left+width]

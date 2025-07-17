@@ -119,6 +119,15 @@ class WarehouseController(Node):
         self.last_qr_attempt_time = None
         self.navigation_to_qr_complete = False  # New flag to track navigation phase
         
+        # Navigation reference tracking
+        self.first_shelf_found = False  # Track if we've found the first shelf
+        
+        # Pose correction tracking
+        self.pose_correction_attempts = 0
+        self.max_pose_correction_attempts = 3
+        self.last_correction_shelf_angle = None
+        self.correction_angle_tolerance = 2.0  # degrees - minimum change to retry correction
+        
         self.get_logger().info("Warehouse Controller initialized")
 
     def pose_callback(self, msg):
@@ -138,11 +147,19 @@ class WarehouseController(Node):
                 self.latest_blob_rects.append(blob)
 
     def shelf_det_callback(self, msg):
-        # Data format: [area_ratio, angle]
-        if len(msg.data) >= 2:
+        # Data format: [area_ratio, angle, x1, y1, x2, y2]
+        if len(msg.data) >= 6:
             self.latest_shelf_det = {
                 'area_ratio': msg.data[0],
-                'angle': msg.data[1]
+                'angle': msg.data[1],
+                'bbox': [msg.data[2], msg.data[3], msg.data[4], msg.data[5]]  # [x1, y1, x2, y2]
+            }
+        elif len(msg.data) >= 2:
+            # Fallback for old format
+            self.latest_shelf_det = {
+                'area_ratio': msg.data[0],
+                'angle': msg.data[1],
+                'bbox': None
             }
 
     def object_dets_callback(self, msg):
@@ -498,19 +515,14 @@ class WarehouseController(Node):
         self.get_logger().info(f"Current State: {self.current_state.name}, Goal Completed: {self.goal_completed}, Detection Status: {self.detection_status}")
         
         if self.current_state == RobotState.EXPLORING_FOR_SHELF:
-            time.sleep(2)
             self.handle_exploring_for_shelf()
         elif self.current_state == RobotState.APPROACHING_SHELF:
-            time.sleep(2)
             self.handle_approaching_shelf()
         elif self.current_state == RobotState.SCANNING_QR:
-            time.sleep(2)
             self.handle_scanning_qr()
         elif self.current_state == RobotState.DETECTING_OBJECTS:
-            time.sleep(2)
             self.handle_detecting_objects()
         elif self.current_state == RobotState.NAVIGATING_TO_NEXT_SHELF:
-            time.sleep(2)
             self.handle_navigating_to_next_shelf()
 
     def handle_exploring_for_shelf(self):
@@ -526,30 +538,45 @@ class WarehouseController(Node):
             self.get_logger().info(f"Blob {i}: Center {blob['center']}, Is shelf: {is_shelf}")
             
             if is_shelf:
-                # Found a shelf!
                 self.get_logger().info(f"Shelf detected at {blob['center']}!")
                 
-                # Create shelf pose from blob center
                 shelf_pose = PoseStamped()
                 shelf_pose.header.frame_id = "map"
                 shelf_pose.pose.position.x = blob['center'][0]
                 shelf_pose.pose.position.y = blob['center'][1]
-                shelf_pose.pose.orientation.w = 1.0  # No specific orientation needed
+                shelf_pose.pose.orientation.w = 1.0
                 
                 self.last_known_shelf_pose = shelf_pose
-                self.last_known_shelf_blob = blob  # Store blob for corner coordinates
+                self.last_known_shelf_blob = blob
+                self.first_shelf_found = True  # Mark that we've found our first shelf
+                self.reset_pose_correction_tracking()  # Reset correction tracking for new shelf
                 self.current_state = RobotState.APPROACHING_SHELF
                 self.get_logger().info("Transitioning to APPROACHING_SHELF")
                 return
         
-        # Continue exploring - send next goal along current_nav_angle
-        robot_x = self.current_pose.pose.pose.position.x
-        robot_y = self.current_pose.pose.pose.position.y
+        # For navigation line continuation, always use robot's current position
+        # except for the very first goal after QR scanning where we start from shelf center
+        if self.first_shelf_found and hasattr(self, 'first_exploration_after_qr') and self.first_exploration_after_qr:
+            # First exploration goal after QR scan - start from shelf center
+            start_x = self.last_known_shelf_pose.pose.position.x
+            start_y = self.last_known_shelf_pose.pose.position.y
+            self.first_exploration_after_qr = False  # Reset flag
+            self.get_logger().info(f"First exploration after QR scan - starting from shelf center ({start_x:.2f}, {start_y:.2f})")
+        elif self.first_shelf_found:
+            # Continue exploration from robot's current position along the navigation line
+            start_x = self.current_pose.pose.pose.position.x
+            start_y = self.current_pose.pose.pose.position.y
+            self.get_logger().info(f"Continuing exploration from robot position ({start_x:.2f}, {start_y:.2f})")
+        else:
+            # Very first exploration (before any shelf is found) - use robot position
+            start_x = self.current_pose.pose.pose.position.x
+            start_y = self.current_pose.pose.pose.position.y
+            self.get_logger().info(f"Initial exploration from robot position ({start_x:.2f}, {start_y:.2f})")
         
-        next_x = robot_x + GOAL_STEP_DISTANCE * math.cos(self.current_nav_angle)
-        next_y = robot_y + GOAL_STEP_DISTANCE * math.sin(self.current_nav_angle)
+        next_x = start_x + GOAL_STEP_DISTANCE * math.cos(self.current_nav_angle)
+        next_y = start_y + GOAL_STEP_DISTANCE * math.sin(self.current_nav_angle)
         
-        self.get_logger().info(f"Sending exploration goal to ({next_x:.2f}, {next_y:.2f})")
+        self.get_logger().info(f"Sending exploration goal to ({next_x:.2f}, {next_y:.2f}) from ({start_x:.2f}, {start_y:.2f}) at angle {math.degrees(self.current_nav_angle):.1f}°")
         goal = self.create_nav_goal(next_x, next_y, self.current_nav_angle)
         self.send_nav_goal(goal)
 
@@ -623,13 +650,87 @@ class WarehouseController(Node):
         if min_dist_to_length_side < min_dist_to_breadth_side:
             # Closer to any length side - do object detection first (objects are on length side)
             self.detection_status = "qr"  # QR scanning left to do after object detection
+            self.reset_pose_correction_tracking()  # Reset correction tracking for new state
             self.current_state = RobotState.DETECTING_OBJECTS
             self.get_logger().info(f"Closer to length side ({closest_side}) - Transitioning to DETECTING_OBJECTS, will do QR scanning after")
         else:
             # Closer to any breadth side - do QR scanning first (QR is on breadth side)
             self.detection_status = "objdet"  # Object detection left to do after QR scanning
+            self.reset_pose_correction_tracking()  # Reset correction tracking for new state
             self.current_state = RobotState.SCANNING_QR
             self.get_logger().info(f"Closer to breadth side ({closest_side}) - Transitioning to SCANNING_QR, will do object detection after")
+
+    def is_shelf_centered_in_image(self, target_angle_tolerance=5.0, image_width=640, boundary_pixels=10):
+        """Check if shelf is centered in image for accurate scanning"""
+        if not self.latest_shelf_det:
+            return True  # If no shelf detection, assume it's centered
+            
+        # Check angle tolerance (shelf should be roughly in center)
+        shelf_angle = self.latest_shelf_det['angle']
+        if abs(shelf_angle) > target_angle_tolerance:
+            return False
+            
+        # Check bounding box position if available
+        if self.latest_shelf_det.get('bbox'):
+            x1, y1, x2, y2 = self.latest_shelf_det['bbox']
+            center_x = (x1 + x2) / 2
+            
+            # Check if shelf center is not too close to image boundaries
+            if (center_x < boundary_pixels or 
+                center_x > (image_width - boundary_pixels)):
+                return False
+                
+        return True
+
+    def calculate_pose_correction(self, target_angle_tolerance=5.0):
+        """Calculate small pose correction to center the shelf"""
+        if not self.latest_shelf_det or not self.current_pose:
+            return None
+            
+        shelf_angle = self.latest_shelf_det['angle']
+        
+        # Check if we've already tried too many corrections
+        if self.pose_correction_attempts >= self.max_pose_correction_attempts:
+            self.get_logger().warn(f"Max pose correction attempts ({self.max_pose_correction_attempts}) reached, proceeding without correction")
+            return None
+            
+        # Only correct if angle is outside tolerance but not too large
+        if abs(shelf_angle) <= target_angle_tolerance or abs(shelf_angle) > 30.0:
+            return None
+            
+        # Check if shelf angle has changed significantly since last correction
+        if (self.last_correction_shelf_angle is not None and 
+            abs(shelf_angle - self.last_correction_shelf_angle) < self.correction_angle_tolerance):
+            self.get_logger().info(f"Shelf angle ({shelf_angle:.1f}°) hasn't changed significantly since last correction, skipping")
+            return None
+            
+        # Calculate small rotation correction
+        # Positive angle means shelf is to the right, so rotate left (negative)
+        correction_angle = -shelf_angle * 0.5  # Use half the angle for gentle correction
+        correction_radians = math.radians(correction_angle)
+        
+        # Get current robot position and orientation
+        current_x = self.current_pose.pose.pose.position.x
+        current_y = self.current_pose.pose.pose.position.y
+        current_yaw = self.get_yaw_from_pose(self.current_pose.pose.pose)
+        
+        # Calculate new orientation
+        new_yaw = current_yaw + correction_radians
+        
+        # Track this correction attempt
+        self.pose_correction_attempts += 1
+        self.last_correction_shelf_angle = shelf_angle
+        
+        self.get_logger().info(f"Pose correction {self.pose_correction_attempts}/{self.max_pose_correction_attempts}: " +
+                              f"shelf angle {shelf_angle:.1f}°, correction {correction_angle:.1f}°")
+        
+        return self.create_nav_goal(current_x, current_y, new_yaw)
+
+    def reset_pose_correction_tracking(self):
+        """Reset pose correction tracking for a new shelf"""
+        self.pose_correction_attempts = 0
+        self.last_correction_shelf_angle = None
+        self.get_logger().info("Reset pose correction tracking")
 
     def handle_scanning_qr(self):
         """Handle SCANNING_QR state"""
@@ -642,15 +743,31 @@ class WarehouseController(Node):
             self.reset_qr_scanning_state()
             return
 
-        # Skip navigation phase and go directly to scanning when goal completes
+        # Check if goal is completed before proceeding
         if self.goal_completed:
-            # Perform QR scanning immediately
+            # Commented out pose correction for debugging
+            # if (not self.is_shelf_centered_in_image() and 
+            #     self.pose_correction_attempts < self.max_pose_correction_attempts):
+            #     correction_goal = self.calculate_pose_correction()
+            #     if correction_goal:
+            #         self.get_logger().info("Shelf not centered, applying pose correction")
+            #         success = self.send_nav_goal(correction_goal)
+            #         if success:
+            #             return  # Wait for correction to complete
+            #     else:
+            #         self.get_logger().info("Pose correction not needed or already attempted, proceeding with QR scanning")
+            # elif not self.is_shelf_centered_in_image():
+            #     self.get_logger().warn(f"Shelf not centered but max corrections ({self.max_pose_correction_attempts}) reached, proceeding with QR scanning")
+            # else:
+            #     self.get_logger().info("Shelf appears centered, proceeding with QR scanning")
+            
+            # Perform QR scanning
             self.get_logger().info("Performing QR scanning")
             
             # Initialize scanning timers if needed
             if not self.qr_scan_start_time:
                 self.qr_scan_start_time = time.time()
-                self.qr_scan_requested = True  # Mark that we're scanning
+                self.qr_scan_requested = True
                 self.get_logger().info("QR scanning started")
             
             current_time = time.time()
@@ -658,12 +775,10 @@ class WarehouseController(Node):
             # Determine if we should make a scanning attempt
             should_attempt = False
             if self.qr_scan_attempts == 0:
-                # First attempt - wait for robot to stabilize
                 if current_time - self.qr_scan_start_time > 2.0:
                     should_attempt = True
                     self.get_logger().info("Robot stabilized, making first QR scan attempt")
             else:
-                # Subsequent attempts - enforce interval between attempts
                 if (self.last_qr_attempt_time and 
                     current_time - self.last_qr_attempt_time > self.qr_attempt_interval):
                     should_attempt = True
@@ -681,12 +796,11 @@ class WarehouseController(Node):
                 shelf_id, angle = self.parse_qr_string(self.latest_qr_result)
                 if shelf_id is not None:
                     self.get_logger().info(f"QR decoded successfully after {self.qr_scan_attempts} attempts: Shelf {shelf_id}, Angle {angle}")
-                    # Reset all scanning state variables
                     self.reset_qr_scanning_state()
                     
-                    # Transition to next state
                     if self.detection_status == "objdet":
                         self.detection_status = "0"
+                        self.reset_pose_correction_tracking()  # Reset for object detection
                         self.current_state = RobotState.DETECTING_OBJECTS
                         self.get_logger().info("Transitioning to DETECTING_OBJECTS")
                     else:
@@ -700,11 +814,8 @@ class WarehouseController(Node):
                 self.qr_scan_attempts >= self.max_qr_attempts):
                 
                 self.get_logger().warn(f"QR scanning failed: attempts={self.qr_scan_attempts}, timeout={current_time - self.qr_scan_start_time:.1f}s")
-                
-                # Reset all scanning state variables
                 self.reset_qr_scanning_state()
                 
-                # Transition to next state
                 if self.detection_status == "objdet":
                     self.detection_status = "0"
                     self.current_state = RobotState.DETECTING_OBJECTS
@@ -712,14 +823,6 @@ class WarehouseController(Node):
                 else:
                     self.current_state = RobotState.NAVIGATING_TO_NEXT_SHELF
                     self.get_logger().info("Failed QR scan - Transitioning to NAVIGATING_TO_NEXT_SHELF")
-    
-    def reset_qr_scanning_state(self):
-        """Reset all QR scanning state variables"""
-        self.qr_scan_requested = False
-        self.navigation_to_qr_complete = False
-        self.qr_scan_start_time = None
-        self.qr_scan_attempts = 0
-        self.last_qr_attempt_time = None
 
     def handle_detecting_objects(self):
         """Handle DETECTING_OBJECTS state"""
@@ -732,13 +835,30 @@ class WarehouseController(Node):
         
         # Only send new goal if current one is completed
         if self.goal_completed:
-            # Add 2 second delay for debugging
-            time.sleep(2.0)
-            
-            # Calculate object detection pose using corner coordinates
-            obj_goal = self.calculate_object_detect_pose(self.last_known_shelf_pose, self.last_known_shelf_blob)
-            self.get_logger().info(f"Sending object detection goal to ({obj_goal.pose.position.x:.2f}, {obj_goal.pose.position.y:.2f})")
-            self.send_nav_goal(obj_goal)
+            # Commented out pose correction for debugging
+            # if not hasattr(self, '_object_detection_goal_sent'):
+            #     if (not self.is_shelf_centered_in_image() and 
+            #         self.pose_correction_attempts < self.max_pose_correction_attempts):
+            #         correction_goal = self.calculate_pose_correction()
+            #         if correction_goal:
+            #             self.get_logger().info("Shelf not centered for object detection, applying pose correction")
+            #             success = self.send_nav_goal(correction_goal)
+            #             if success:
+            #                 return  # Wait for correction to complete
+            #         else:
+            #             self.get_logger().info("Pose correction not needed, proceeding with object detection")
+            #     elif not self.is_shelf_centered_in_image():
+            #         self.get_logger().warn(f"Shelf not centered but max corrections ({self.max_pose_correction_attempts}) reached, proceeding with object detection")
+            #     else:
+            #         self.get_logger().info("Shelf appears centered, proceeding with object detection")
+                
+            # Proceed with object detection
+            if not hasattr(self, '_object_detection_goal_sent'):
+                time.sleep(2.0)
+                obj_goal = self.calculate_object_detect_pose(self.last_known_shelf_pose, self.last_known_shelf_blob)
+                self.get_logger().info(f"Sending object detection goal to ({obj_goal.pose.position.x:.2f}, {obj_goal.pose.position.y:.2f})")
+                self.send_nav_goal(obj_goal)
+                self._object_detection_goal_sent = True
         
         # Process object detections
         self.process_object_detections()
@@ -789,20 +909,25 @@ class WarehouseController(Node):
         for obj in valid_objects:
             self.get_logger().info(f"Object: {obj['class_name']} (ID: {obj['class_id']}) - Confidence: {obj['confidence']:.2f}")
         
-        if len(valid_objects) >= 1:  # Simplified condition
+        if len(valid_objects) >= 1:
             # Publish shelf data
             shelf_msg = WarehouseShelf()
             shelf_msg.object_name = [obj['class_name'] for obj in valid_objects]
-            shelf_msg.object_count = [1] * len(valid_objects)  # Simplified - count as 1 each
+            shelf_msg.object_count = [1] * len(valid_objects)
             if self.latest_qr_result:
                 shelf_msg.qr_decoded = self.latest_qr_result
             
             self.publisher_shelf_data.publish(shelf_msg)
             self.get_logger().info(f"Published shelf data: {shelf_msg.object_name}")
             
+            # Reset the object detection goal flag
+            if hasattr(self, '_object_detection_goal_sent'):
+                delattr(self, '_object_detection_goal_sent')
+            
             # Transition based on detection_status
             if self.detection_status == "qr":
                 self.detection_status = "0"
+                self.reset_pose_correction_tracking()  # Reset for QR scanning
                 self.current_state = RobotState.SCANNING_QR
                 self.get_logger().info("Transitioning to SCANNING_QR")
             else:
@@ -810,6 +935,11 @@ class WarehouseController(Node):
                 self.get_logger().info("Transitioning to NAVIGATING_TO_NEXT_SHELF")
         else:
             self.get_logger().warn("No valid objects detected, but proceeding anyway")
+            
+            # Reset the object detection goal flag
+            if hasattr(self, '_object_detection_goal_sent'):
+                delattr(self, '_object_detection_goal_sent')
+            
             # Still transition to avoid getting stuck
             if self.detection_status == "qr":
                 self.detection_status = "0"
@@ -826,16 +956,37 @@ class WarehouseController(Node):
         if self.latest_qr_result:
             shelf_id, angle = self.parse_qr_string(self.latest_qr_result)
             if angle is not None:
+                # Set the navigation angle from the QR code
                 self.current_nav_angle = math.radians(angle)
+                
+                # Set flag to use shelf center for the first exploration goal
+                self.first_exploration_after_qr = True
+                
                 if shelf_id is not None:
                     self.detected_shelf_IDs.add(shelf_id)
+                
                 self.current_state = RobotState.EXPLORING_FOR_SHELF
                 self.latest_qr_result = None  # Reset for next shelf
-                self.get_logger().info(f"Navigating to next shelf at angle {angle} degrees, transitioning to EXPLORING")
+                
+                if self.last_known_shelf_pose:
+                    shelf_x = self.last_known_shelf_pose.pose.position.x
+                    shelf_y = self.last_known_shelf_pose.pose.position.y
+                    self.get_logger().info(f"Navigation angle {angle}° set from shelf center ({shelf_x:.2f}, {shelf_y:.2f})")
+                    self.get_logger().info("Next exploration will start from this shelf center, then continue from robot position")
+                
+                self.get_logger().info(f"Transitioning to EXPLORING at angle {angle}° from previous shelf center")
             else:
                 self.get_logger().warn("Could not parse angle from QR result")
         else:
             self.get_logger().warn("No QR result available for navigation")
+
+    def reset_qr_scanning_state(self):
+        """Reset all QR scanning state variables"""
+        self.qr_scan_requested = False
+        self.navigation_to_qr_complete = False
+        self.qr_scan_start_time = None
+        self.qr_scan_attempts = 0
+        self.last_qr_attempt_time = None
 
 def main(args=None):
     rclpy.init(args=args)
